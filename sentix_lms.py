@@ -325,9 +325,15 @@ def transcribe(videos, model_name="small"):
         txt = path + ".txt"
         if os.path.exists(txt) and os.path.getsize(txt) > 0:
             continue
-        segs, _ = model.transcribe(path, vad_filter=True, language="en")
+        try:
+            segs, _ = model.transcribe(path, vad_filter=True, language="en")
+            lines = "\n".join(f"[{s.start:7.1f}] {s.text.strip()}" for s in segs)
+        except Exception as e:
+            # A video with no/undecodable audio track shouldn't kill the batch.
+            print(f"    -> {os.path.basename(path)}: skipped ({e})")
+            continue
         with open(txt, "w") as f:
-            f.write(f"# {filename}\n" + "\n".join(f"[{s.start:7.1f}] {s.text.strip()}" for s in segs))
+            f.write(f"# {filename}\n" + lines + "\n")
         print(f"    -> {os.path.basename(txt)}")
 
 
