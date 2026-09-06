@@ -1,8 +1,9 @@
-# Downloaded lesson media and transcripts — never commit training content
+# Downloaded lesson media, transcripts and captured Q&A — never commit training content
 output/
 *.mp4
 *.mp4.txt
 *_transcript.md
+*_questions.txt
 
 # Session cookies / credentials
 sentix_ck_*

@@ -86,10 +86,11 @@ export SENTIX_COID='000000'
 
 ## Usage
 
-### List your lessons
+### List / search your lessons
 
 ```bash
-python3 sentix_lms.py scan
+python3 sentix_lms.py scan            # everything
+python3 sentix_lms.py scan "forklift" # only lessons whose name contains "forklift"
 ```
 
 ```
@@ -104,9 +105,13 @@ Available (58):
 
 ### Complete lessons
 
-By default `run` just **completes** the lesson(s) — no files are saved.
+By default `run` just **completes** the lesson(s) — no files are saved. Progress
+is logged by lesson **name**, not just id.
 
 ```bash
+# by name (case-insensitive substring — completes every lesson that matches)
+python3 sentix_lms.py run --name "annual safety"
+
 # a single lesson by id
 python3 sentix_lms.py run --lesson 123456
 
@@ -146,18 +151,30 @@ CPU.
 > that is already finished resumes at its last page and has nothing new to
 > collect.
 
+### Also save the questions and answers (`--save-questions`)
+
+```bash
+python3 sentix_lms.py run --name "annual safety" --transcribe --save-questions
+```
+
+Writes `<lessonId>_questions.txt` in the output directory with each question, its
+options (the correct one marked with `*`), and the answer. Handy alongside
+`--transcribe` so a lesson's video narration and its quiz land in the same place.
+
 ---
 
 ## Command reference
 
 ```
-scan                       list assigned and available lessons
-run  --lesson ID           complete one lesson
+scan [PATTERN]             list lessons (optionally filtered by name substring)
+run  --lesson ID           complete one lesson by id
+     --name PATTERN        complete every lesson whose name contains PATTERN
      --assigned            complete every assigned / in-progress lesson
      --available           complete every available lesson
      --all                 complete every assigned AND available lesson
      --download            also keep the lesson videos
      --transcribe          also transcribe them (implies --download)
+     --save-questions      also save each lesson's questions + answers to a text file
      --out DIR             output directory (default ./output)
      --model NAME          faster-whisper model (default: small)
 

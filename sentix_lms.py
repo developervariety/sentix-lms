@@ -139,9 +139,23 @@ _PAGE = {
 def parse(html):
     d = {k: (r.search(html).group(1) if r.search(html) else None) for k, r in _PAGE.items()}
     d["rids"] = re.findall(r"ResponseID=(\d+)", html)
+    d["html"] = html
     if d["file"]:
         d["file"] = d["file"].strip()
     return d
+
+
+def _text(html):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", html)).strip()
+
+
+def parse_question(html):
+    """Return (question_text, {ResponseID: option_text}) for a question page."""
+    options = {}
+    for m in re.finditer(r'<a[^>]*onClick="[^"]*ResponseID=(\d+)[^"]*"[^>]*>(.*?)</a>', html, re.S | re.I):
+        options[m.group(1)] = _text(m.group(2))
+    m = re.search(r'class="QuestionWrapper"[^>]*>(.*?)<a[^>]*ResponseID', html, re.S | re.I)
+    return (_text(m.group(1)) if m else ""), options
 
 
 def video_duration(path, default=300):
@@ -241,12 +255,13 @@ def advance(sess, lesson, cur, page_time, coid, tries=8):
     return p
 
 
-def walk(sess, lesson, coid, known, out_dir=None, keep=False, max_pages=80):
+def walk(sess, lesson, coid, known, out_dir=None, keep=False, qa=None, max_pages=80):
     """Walk one lesson to the end, auto-accepting every page.
 
     Returns (kept_videos, reached_end, last_page). A video's file is fetched to
     read its length even without `keep`; it is only saved to `out_dir` when
-    `keep` is set.
+    `keep` is set. When `qa` is a dict, each question's text, options and the
+    correct answer are recorded into it (keyed by the correct ResponseID).
     """
     if keep:
         os.makedirs(out_dir, exist_ok=True)
@@ -274,6 +289,10 @@ def walk(sess, lesson, coid, known, out_dir=None, keep=False, max_pages=80):
             print(f"  page {cur}/{total} [VIDEO] {p['file']}")
         elif p["type"] == "QUESTION":
             rid, clean = answer_question(sess, lesson, p["rids"], known)
+            if qa is not None and rid and rid not in qa:
+                stem, options = parse_question(p["html"])
+                if options:
+                    qa[rid] = (stem, options.get(rid, ""), options)
             print(f"  page {cur}/{total} [QUESTION] answered={rid}"
                   f"{'' if clean else ' (discovered — will apply next pass)'}")
             if rid and not clean:
@@ -312,7 +331,21 @@ def transcribe(videos, model_name="small"):
         print(f"    -> {os.path.basename(txt)}")
 
 
-def run_lesson(auth, lesson, name, out_dir, keep, known, attempts=40):
+def write_questions(lesson, name, qa, out_dir):
+    """Save a lesson's questions and correct answers to a text file."""
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{lesson}_questions.txt")
+    with open(path, "w") as f:
+        f.write(f"# {name} (lesson {lesson}) — {len(qa)} question(s)\n")
+        for i, (rid, (stem, answer, options)) in enumerate(qa.items(), 1):
+            f.write(f"\nQ{i}. {stem}\n")
+            for oid, text in options.items():
+                f.write(f"  [{'*' if oid == rid else ' '}] {text}\n")
+            f.write(f"  Answer: {answer}\n")
+    print(f"  wrote {path} ({len(qa)} question(s))")
+
+
+def run_lesson(auth, lesson, name, out_dir, keep, known, save_questions=False, attempts=40):
     """Walk a lesson to completion, re-opening a fresh session between attempts.
 
     Progress is saved server-side, so each attempt resumes where the last left
@@ -323,15 +356,18 @@ def run_lesson(auth, lesson, name, out_dir, keep, known, attempts=40):
     """
     print(f"Lesson {lesson}: {name}")
     videos, prev = [], -1
+    qa = {} if save_questions else None
     for _ in range(attempts):
         v, reached, page = with_session(
-            auth, lambda s: walk(s, lesson, s.coid, known, out_dir=out_dir, keep=keep))
+            auth, lambda s: walk(s, lesson, s.coid, known, out_dir=out_dir, keep=keep, qa=qa))
         videos += v
         if reached or page <= prev:
             if not reached and page <= prev:
                 print(f"  lesson {lesson}: no further progress past page {page}; moving on")
             break
         prev = page
+    if qa:
+        write_questions(lesson, name, qa, out_dir)
     return videos
 
 
@@ -353,24 +389,34 @@ def main():
 
     s = sub.add_parser("scan", help="list assigned and available lessons")
     add_auth(s)
+    s.add_argument("pattern", nargs="?", help="only show lessons whose name contains this (case-insensitive)")
 
-    r = sub.add_parser("run", help="walk lessons (auto-accept); optionally download / transcribe")
+    r = sub.add_parser("run", help="complete lessons (auto-accept); optionally download / transcribe")
     add_auth(r)
     g = r.add_mutually_exclusive_group(required=True)
     g.add_argument("--lesson", help="a single lesson id")
+    g.add_argument("--name", help="complete lessons whose name contains this (case-insensitive)")
     g.add_argument("--assigned", action="store_true", help="every assigned / in-progress lesson")
     g.add_argument("--available", action="store_true", help="every available lesson")
     g.add_argument("--all", action="store_true", help="every assigned AND available lesson")
     r.add_argument("--download", action="store_true", help="save the lesson videos (default: don't keep them)")
     r.add_argument("--transcribe", action="store_true", help="transcribe the videos (implies --download)")
+    r.add_argument("--save-questions", action="store_true",
+                   help="save each lesson's questions + correct answers to a text file (pairs with --transcribe)")
     r.add_argument("--out", default="./output", help="download/transcript directory (default ./output)")
     r.add_argument("--model", default="small", help="faster-whisper model (tiny/base/small/medium)")
 
     args = ap.parse_args()
     auth = (args.landing_url, args.uid, args.coid)
 
+    def matching(lessons, pattern):
+        p = pattern.lower()
+        return [(i, n) for i, n in lessons if p in n.lower()]
+
     if args.cmd == "scan":
         assigned, available = with_session(auth, scan)
+        if args.pattern:
+            assigned, available = matching(assigned, args.pattern), matching(available, args.pattern)
         print(f"Assigned / in progress ({len(assigned)}):")
         for i, n in assigned:
             print(f"  {i:>8}  {n}")
@@ -379,12 +425,22 @@ def main():
             print(f"  {i:>8}  {n}")
         return
 
-    # run
+    # run — fetch the lesson list once, both to resolve ids to names in the log
+    # and to serve the name-based and group targets.
     keep = args.download or args.transcribe
+    assigned, available = with_session(auth, scan)
+    by_id = dict(assigned + available)
     if args.lesson:
-        targets = [(args.lesson, args.lesson)]
+        targets = [(args.lesson, by_id.get(args.lesson, args.lesson))]
+    elif args.name:
+        targets = matching(assigned + available, args.name)
+        if not targets:
+            sys.exit(f"No lesson name contains '{args.name}'. Try `scan {args.name}` to search.")
+        if len(targets) > 1:
+            print(f"{len(targets)} lessons match '{args.name}':")
+            for i, n in targets:
+                print(f"  {i}  {n}")
     else:
-        assigned, available = with_session(auth, scan)
         targets = []
         if args.assigned or args.all:
             targets += assigned
@@ -393,7 +449,7 @@ def main():
 
     all_videos, known = [], set()
     for lid, name in targets:
-        all_videos += run_lesson(auth, lid, name, args.out, keep, known)
+        all_videos += run_lesson(auth, lid, name, args.out, keep, known, args.save_questions)
 
     seen, uniq = set(), []
     for fn, path in all_videos:
