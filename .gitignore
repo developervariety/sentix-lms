@@ -1,0 +1,20 @@
+# Downloaded lesson media and transcripts — never commit training content
+output/
+*.mp4
+*.mp4.txt
+*_transcript.md
+
+# Session cookies / credentials
+sentix_ck_*
+cookies*.txt
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS
+.DS_Store
+._*
