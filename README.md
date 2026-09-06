@@ -1,13 +1,14 @@
 # sentix-lms
 
 A small command-line tool to automate a **Sentix LMS** (SambaSafety) training
-account: log in, list your lessons, and walk any lesson from start to finish —
-playing through the video pages and answering the knowledge-check questions —
-while **downloading every lesson video** and, optionally, **transcribing** the
-narration to text.
+account: log in, list your lessons, and **complete** any lesson — playing
+through the video pages and answering the knowledge-check questions, including
+finalizing the last page so the lesson is marked complete (which unlocks the
+next available lessons). Downloading the lesson videos and transcribing the
+narration are **optional** flags.
 
-It exists so you can **archive and review training on an account you own**
-without clicking through each page by hand. Every run opens its own fresh,
+It exists so you can **complete, archive, and review training on an account you
+own** without clicking through each page by hand. Every run opens its own fresh,
 isolated session, so concurrent runs never corrupt each other's progress.
 
 > **Use responsibly.** Only run this against an account you own and are
@@ -19,17 +20,24 @@ isolated session, so concurrent runs never corrupt each other's progress.
 ## How it works
 
 A Sentix lesson is a sequence of pages. Each page is either a **video** or a
-**question**. The tool reproduces exactly what the web player does:
+**question**. The tool reproduces what the web player does:
 
-- **Video page** — downloads the page's MP4, then records the required watch
-  time and advances.
-- **Question page** — submits answer options until the server accepts a correct
-  one, then advances.
+- **Video page** — records the required watch time and advances. (The MP4 is
+  fetched to read its length; it is kept only with `--download`.)
+- **Question page** — finds the correct option and submits it, then advances.
+- **Last page** — submits the final page so the server marks the lesson
+  complete, which is what unlocks the next available lessons.
 
 It reads the page state (`ThisPage`, `Type`, `Filename`, `TotalPages`) straight
-from the player and loops until the last page. The one quirk it handles for you:
-the "next" navigation can return the site's error page even when it actually
-succeeded, so the tool always re-reads the player to get the true page.
+from the player and loops until the lesson is finished.
+
+A couple of platform quirks it handles for you:
+
+- The "next" navigation can return the site's error page even when it actually
+  succeeded, so the tool always re-reads the player to get the true page.
+- Submitting a *wrong* answer locks that question for the rest of the session,
+  so the tool discovers the correct option in one session and applies it cleanly
+  from a fresh one. That is also why it uses a fresh session per run/retry.
 
 ---
 
@@ -47,8 +55,8 @@ succeeded, so the tool always re-reads the player to get the true page.
   which bundles its own audio decoder (PyAV) — **no separate ffmpeg install
   needed.** The speech model downloads automatically on first use.
 
-Downloading videos and walking lessons needs **no** extra packages — just Python
-and `curl`.
+Completing lessons and downloading videos needs **no** extra packages — just
+Python and `curl`.
 
 ---
 
@@ -94,7 +102,9 @@ Available (58):
     ...
 ```
 
-### Walk a lesson (download videos)
+### Complete lessons
+
+By default `run` just **completes** the lesson(s) — no files are saved.
 
 ```bash
 # a single lesson by id
@@ -103,23 +113,38 @@ python3 sentix_lms.py run --lesson 123456
 # every assigned / in-progress lesson
 python3 sentix_lms.py run --assigned
 
+# every available lesson
+python3 sentix_lms.py run --available
+
 # everything (assigned + available)
 python3 sentix_lms.py run --all
+```
+
+### Also keep the videos (`--download`)
+
+```bash
+python3 sentix_lms.py run --lesson 123456 --download
 ```
 
 Videos are saved to `./output/` (override with `--out DIR`) as
 `<lessonId>_<original-filename>.mp4`. Re-running skips files already downloaded.
 
-### Also transcribe the narration
+### Also transcribe the narration (`--transcribe`)
 
 ```bash
 python3 sentix_lms.py run --lesson 123456 --transcribe
 python3 sentix_lms.py run --assigned --transcribe --model small
 ```
 
-Each video gets a `<video>.mp4.txt` with time-stamped narration beside it.
-`--model` accepts any faster-whisper size (`tiny`, `base`, `small`, `medium`);
-`small` is a good speed/accuracy balance on CPU.
+`--transcribe` implies `--download`. Each video gets a `<video>.mp4.txt` with
+time-stamped narration beside it. `--model` accepts any faster-whisper size
+(`tiny`, `base`, `small`, `medium`); `small` is a good speed/accuracy balance on
+CPU.
+
+> Videos are collected as the lesson is walked, so `--download`/`--transcribe`
+> capture everything on a lesson that still has pages left to complete. A lesson
+> that is already finished resumes at its last page and has nothing new to
+> collect.
 
 ---
 
@@ -127,11 +152,13 @@ Each video gets a `<video>.mp4.txt` with time-stamped narration beside it.
 
 ```
 scan                       list assigned and available lessons
-run  --lesson ID           walk one lesson
-     --assigned            walk every assigned / in-progress lesson
-     --all                 walk every assigned AND available lesson
+run  --lesson ID           complete one lesson
+     --assigned            complete every assigned / in-progress lesson
+     --available           complete every available lesson
+     --all                 complete every assigned AND available lesson
+     --download            also keep the lesson videos
+     --transcribe          also transcribe them (implies --download)
      --out DIR             output directory (default ./output)
-     --transcribe          transcribe downloaded videos to text
      --model NAME          faster-whisper model (default: small)
 
 Auth (any command): --landing-url URL | --uid UID --coid COID

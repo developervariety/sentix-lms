@@ -2,14 +2,15 @@
 """
 sentix-lms — automate a Sentix LMS (SambaSafety) training account.
 
-Log in, list the lessons on the account, and walk any lesson from start to
+Log in, list the lessons on the account, and complete any lesson from start to
 finish: it plays through the video pages (recording the watch time each page
-requires) and answers the knowledge-check questions, downloading every lesson
-video and — optionally — transcribing the narration to text.
+requires), answers the knowledge-check questions, and finalizes the last page so
+the lesson is marked complete (which unlocks the next available lessons).
+Downloading the lesson videos and transcribing the narration are optional.
 
-It is meant for archiving and reviewing training on an account you own. Each run
-opens its own fresh, isolated session, so two runs never step on each other's
-progress.
+It is meant for completing, archiving, and reviewing training on an account you
+own. Each run opens its own fresh, isolated session, so two runs never step on
+each other's progress.
 
 Authentication (choose one):
   --landing-url URL        the one-click auto-login link              (env SENTIX_LANDING_URL)
@@ -17,12 +18,13 @@ Authentication (choose one):
 
 Subcommands:
   scan                     list assigned and available lessons
-  run                      walk one or more lessons (download; optional transcribe)
+  run                      complete one or more lessons; optional --download / --transcribe
 
 Examples:
   python3 sentix_lms.py scan
-  python3 sentix_lms.py run --lesson 12345 --transcribe
-  python3 sentix_lms.py run --assigned --out ./output
+  python3 sentix_lms.py run --lesson 12345
+  python3 sentix_lms.py run --assigned --transcribe
+  python3 sentix_lms.py run --all --download --out ./output
 """
 import argparse
 import os
@@ -177,48 +179,83 @@ def answer_question(sess, lesson, rids, known):
     return None, False
 
 
-def advance(sess, lesson, cur, page_time, coid, tries=8):
-    """Record the page time and move to the next page.
+def get_page(sess, lesson):
+    """Fetch and parse the player's current page for a lesson."""
+    return parse(sess.req(f"player.lasso?Lesson={lesson}"))
+
+
+def fetch_video(sess, lesson, filename, out_dir, keep):
+    """Download a page's video and return (page_time, kept_path_or_None).
+
+    The file is fetched either way (its length sets the required watch time); it
+    is kept in `out_dir` only when `keep` is set, otherwise fetched to a temp
+    file that is removed once its duration has been read.
+    """
+    if keep:
+        path = os.path.join(out_dir, f"{lesson}_{filename}")
+        if not os.path.exists(path) or os.path.getsize(path) < 10000:
+            sess.req(f"mobile/{lesson}/{filename}", out=path)
+        return video_duration(path) + 5, path
+    fh = tempfile.NamedTemporaryFile(prefix="sentix_vid_", suffix=".mp4", delete=False)
+    fh.close()
+    sess.req(f"mobile/{lesson}/{filename}", out=fh.name)
+    page_time = video_duration(fh.name) + 5
+    try:
+        os.unlink(fh.name)
+    except OSError:
+        pass
+    return page_time, None
+
+
+def submit_next(sess, lesson, cur, page_time, coid):
+    """Record the current page's time and POST the navigation off it.
 
     A fresh token is read right before navigating, because answering a question
-    rotates the navigation token. The navigation POST can also 302 to the site's
-    error page even when it succeeds, and the saved progress takes a moment to
-    commit — so the authoritative state is a fresh GET of the player, retried
-    until the page number actually moves past `cur` (or the tries run out).
+    rotates the navigation token. On the final page this same POST is what marks
+    the lesson complete (its `lessonend` flag is set), which is what unlocks the
+    next available lessons.
     """
-    token = parse(sess.req(f"player.lasso?Lesson={lesson}"))["token"]
+    token = get_page(sess, lesson)["token"]
     sess.req("lib/updatelessoninfo.lasso", data=f"CoID={coid}&Time={page_time}")
     sess.req("lib/clearRedirect.lasso", data="")
     sess.req(f"player.lasso?-session=LessonLoad:{token}",
              data=f"Lesson={lesson}&Page={cur + 1}&review=&production=&LastPageTime={page_time}&CC=",
              out=os.devnull)
-    last = (None, {"page": None})
+
+
+def advance(sess, lesson, cur, page_time, coid, tries=8):
+    """Move off the current page and return the parsed next page.
+
+    The navigation POST can 302 to the site's error page even when it succeeds,
+    and the saved progress takes a moment to commit — so the authoritative state
+    is a fresh GET of the player, retried until the page number actually moves
+    past `cur` (or the tries run out).
+    """
+    submit_next(sess, lesson, cur, page_time, coid)
+    p = {"page": None}
     for _ in range(tries):
-        h = sess.req(f"player.lasso?Lesson={lesson}")
-        p = parse(h)
-        last = (h, p)
+        p = get_page(sess, lesson)
         if p["page"] and int(p["page"]) > cur:
-            return h, p
+            return p
         time.sleep(1)
-    return last
+    return p
 
 
-def walk(sess, lesson, coid, known, out_dir=None, keep=False, max_pages=80, quiet=False):
-    """Walk one lesson to the end (auto-accepting every page).
+def walk(sess, lesson, coid, known, out_dir=None, keep=False, max_pages=80):
+    """Walk one lesson to the end, auto-accepting every page.
 
-    Returns the list of (filename, path) videos that were KEPT on disk (only when
-    `keep` is set). A video page always needs its duration to advance, so the
-    file is fetched either way — it is just deleted again unless `keep` is set.
+    Returns (kept_videos, reached_end, last_page). A video's file is fetched to
+    read its length even without `keep`; it is only saved to `out_dir` when
+    `keep` is set.
     """
     if keep:
         os.makedirs(out_dir, exist_ok=True)
-    h = sess.req(f"player.lasso?Lesson={lesson}")
-    coid = coid or parse(h)["coid"] or "0"
+    p = get_page(sess, lesson)
+    coid = coid or p["coid"] or "0"
     videos, visited = [], set()
     last_page, reached_end = 0, False
 
     for _ in range(max_pages):
-        p = parse(h)
         if not p["page"]:
             print(f"  lesson {lesson}: no page data (session expired?)")
             break
@@ -231,43 +268,31 @@ def walk(sess, lesson, coid, known, out_dir=None, keep=False, max_pages=80, quie
 
         page_time = 30
         if p["type"] == "VIDEO" and p["file"]:
-            if keep:
-                path = os.path.join(out_dir, f"{lesson}_{p['file']}")
-                if not os.path.exists(path) or os.path.getsize(path) < 10000:
-                    sess.req(f"mobile/{lesson}/{p['file']}", out=path)
-                page_time = video_duration(path) + 5
-                videos.append((p["file"], path))
-            else:
-                fh = tempfile.NamedTemporaryFile(prefix="sentix_vid_", suffix=".mp4", delete=False)
-                fh.close()
-                sess.req(f"mobile/{lesson}/{p['file']}", out=fh.name)
-                page_time = video_duration(fh.name) + 5
-                try:
-                    os.unlink(fh.name)
-                except OSError:
-                    pass
-            if not quiet:
-                print(f"  page {cur}/{total} [VIDEO] {p['file']}")
+            page_time, kept = fetch_video(sess, lesson, p["file"], out_dir, keep)
+            if kept:
+                videos.append((p["file"], kept))
+            print(f"  page {cur}/{total} [VIDEO] {p['file']}")
         elif p["type"] == "QUESTION":
             rid, clean = answer_question(sess, lesson, p["rids"], known)
-            if not quiet:
-                print(f"  page {cur}/{total} [QUESTION] answered={rid}"
-                      f"{'' if clean else ' (discovered — will apply next pass)'}")
+            print(f"  page {cur}/{total} [QUESTION] answered={rid}"
+                  f"{'' if clean else ' (discovered — will apply next pass)'}")
             if rid and not clean:
                 # This session's question is now locked; stop so a fresh session
                 # can answer it cleanly with the id we just learned.
                 break
-        elif not quiet:
+        else:
             print(f"  page {cur}/{total} [{p['type']}]")
 
         if cur >= total:
+            # Submit the final page (its lessonend flag is set) to mark the
+            # lesson complete — this is what unlocks the next available lessons.
+            submit_next(sess, lesson, cur, page_time, coid)
             reached_end = True
-            if not quiet:
-                print(f"  lesson {lesson}: reached the end ({cur}/{total})")
+            print(f"  lesson {lesson}: reached the end ({cur}/{total}); marked complete")
             break
 
-        h, nxt = advance(sess, lesson, cur, page_time, coid)
-        if not nxt["page"] or int(nxt["page"]) <= cur:
+        p = advance(sess, lesson, cur, page_time, coid)
+        if not p["page"] or int(p["page"]) <= cur:
             print(f"  lesson {lesson}: stalled at page {cur}")
             break
     return videos, reached_end, last_page
