@@ -192,4 +192,5 @@ Auth (any command): --landing-url URL | --uid UID --coid COID
 
 ## License
 
-MIT
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file
+for the full text. © 2026 Justin Lopez.
